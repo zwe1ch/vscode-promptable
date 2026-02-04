@@ -2,7 +2,7 @@
   "name": "promptable",
   "displayName": "Promptable",
   "description": "Copy files and folders as prompt-ready AI context. Supports folders, multi-select, .gitignore, and binary-safe output.",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "publisher": "zwe1ch",
   "author": {
     "name": "Rayk Jackisch",
