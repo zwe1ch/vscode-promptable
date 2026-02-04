@@ -116,6 +116,17 @@ export function activate(context: vscode.ExtensionContext) {
         return !gitignore.ignores(relative);
       });
 
+      filteredFiles.sort((a, b) => {
+        if (!workspaceRoot) {
+          return a.fsPath.localeCompare(b.fsPath);
+        }
+
+        const ra = path.relative(workspaceRoot.fsPath, a.fsPath);
+        const rb = path.relative(workspaceRoot.fsPath, b.fsPath);
+
+        return ra.localeCompare(rb);
+      });
+
       let finalOutput = "";
 
       for (const file of filteredFiles) {
