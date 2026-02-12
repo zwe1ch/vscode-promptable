@@ -1,32 +1,37 @@
-name: Publish Release
+name: CI & Release
+
 on:
   push:
+    branches: [master]
     tags:
       - "v*"
-
-permissions:
-  contents: write
+  pull_request:
 
 jobs:
-  release:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - run: npm install
+      - uses: coactions/setup-xvfb@v1
+        with:
+          run: npm test
 
-      - name: Install Dependencies
-        run: npm install
-
-      - name: Build and Package
-        run: npx @vscode/vsce package
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npx @vscode/vsce package
+      - uses: softprops/action-gh-release@v1
         with:
           files: "*.vsix"
         env:
