@@ -2,14 +2,14 @@
   "name": "promptable",
   "displayName": "Promptable",
   "description": "Copy files and folders as prompt-ready AI context. Supports folders, multi-select, .gitignore, and binary-safe output.",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "publisher": "zwe1ch",
   "author": {
     "name": "Rayk Jackisch",
     "email": "rayk@jackisch.net"
   },
   "engines": {
-    "vscode": "^1.108.1"
+    "vscode": "^1.85.0"
   },
   "icon": "icon.png",
   "categories": [
@@ -68,7 +68,7 @@
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.19.8",
-    "@types/vscode": "^1.108.1",
+    "@types/vscode": "^1.85.0",
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.39.2",
@@ -79,5 +79,9 @@
     "type": "git",
     "url": "https://github.com/zwe1ch/vscode-promptable.git"
   },
+  "bugs": {
+    "url": "https://github.com/zwe1ch/vscode-promptable/issues"
+  },
+  "homepage": "https://github.com/zwe1ch/vscode-promptable#readme",
   "license": "MIT"
 }
