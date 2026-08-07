@@ -2,7 +2,7 @@
   "name": "promptable",
   "displayName": "Promptable",
   "description": "Copy files and folders as prompt-ready AI context. Supports folders, multi-select, .gitignore, and binary-safe output.",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "publisher": "zwe1ch",
   "author": {
     "name": "Rayk Jackisch",
@@ -91,7 +91,7 @@
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "^26.1.2",
-    "@types/vscode": "^1.125.0",
+    "@types/vscode": "1.85.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.1.0",
     "eslint": "^10.8.0",
