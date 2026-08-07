@@ -20,6 +20,9 @@ Right-click files or folders, copy them as structured text, and paste directly i
 - **Git Metadata Stays Excluded**
   The `.git` directory itself is never copied, even when `.gitignore` rules are ignored.
 
+- **Copy Git Changes**
+  Copy all staged, unstaged, untracked, and merge/conflict changes reported by Git across open repositories. Files appearing in multiple change groups are included only once.
+
 - **Binary-Safe**
   Binary files (images, PDFs, archives, executables) are detected automatically and replaced with a placeholder.
 
@@ -52,12 +55,19 @@ The standard command excludes files matched by `.gitignore`. Use the second comm
 1. Right-click inside an open file
 2. Choose **Copy as AI Context**
 
+### Source Control
+
+Use the **Copy All Changed Files as AI Context** button in the Git Source Control toolbar to copy only files currently reported as changed by Git. Deleted files are represented as `[Deleted file — content not available]`; unchanged workspace files are never included.
+
+In multi-repository workspaces, changes from all open Git repositories are combined and deduplicated.
+
 You can also run the command from the Command Palette:
 
 ```
 
 Promptable: Copy as AI Context
 Promptable: Copy as AI Context (Ignore .gitignore)
+Promptable: Copy All Changed Files as AI Context
 
 ```
 

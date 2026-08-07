@@ -2,7 +2,7 @@
   "name": "promptable",
   "displayName": "Promptable",
   "description": "Copy files and folders as prompt-ready AI context. Supports folders, multi-select, .gitignore, and binary-safe output.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "zwe1ch",
   "author": {
     "name": "Rayk Jackisch",
@@ -40,6 +40,12 @@
         "command": "promptable.copyIgnoringGitignore",
         "title": "Copy as AI Context (Ignore .gitignore)",
         "category": "Promptable"
+      },
+      {
+        "command": "promptable.copyChanged",
+        "title": "Copy All Changed Files as AI Context",
+        "category": "Promptable",
+        "icon": "$(copy)"
       }
     ],
     "menus": {
@@ -60,6 +66,13 @@
           "command": "promptable.copyIgnoringGitignore",
           "group": "5_copy@3",
           "when": "resourceScheme == file || resourceScheme == folder"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "promptable.copyChanged",
+          "group": "navigation@10",
+          "when": "scmProvider == git"
         }
       ]
     }

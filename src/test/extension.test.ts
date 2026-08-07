@@ -3,6 +3,9 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import * as vscode from "vscode";
 
+import { CopyChangedResult, copyChangedFiles } from "../extension";
+import { GitChange, GitExtension, GitRepository, GitStatus } from "../git";
+
 const clipboardSentinel = "promptable-test-clipboard-sentinel";
 
 let workspaceRoot: string;
@@ -15,10 +18,49 @@ async function createTempWorkspace(): Promise<string> {
   return directory;
 }
 
-async function executeCopy(command: string, mainUri: vscode.Uri, allUris?: vscode.Uri[]): Promise<string> {
+async function resetClipboard(): Promise<void> {
   await vscode.env.clipboard.writeText(clipboardSentinel);
+  assert.strictEqual(await vscode.env.clipboard.readText(), clipboardSentinel, "Could not reset the test clipboard");
+}
+
+async function executeCopy(command: string, mainUri: vscode.Uri, allUris?: vscode.Uri[]): Promise<string> {
+  await resetClipboard();
   await vscode.commands.executeCommand(command, mainUri, allUris);
   return vscode.env.clipboard.readText();
+}
+
+function gitChange(filePath: string, status: GitStatus): GitChange {
+  return { uri: vscode.Uri.file(filePath), status };
+}
+
+function gitRepository(root: string, changes: Partial<GitRepository["state"]> = {}): GitRepository {
+  return {
+    rootUri: vscode.Uri.file(root),
+    state: {
+      mergeChanges: [],
+      indexChanges: [],
+      workingTreeChanges: [],
+      ...changes
+    }
+  };
+}
+
+function gitExtension(repositories: GitRepository[], enabled = true): GitExtension {
+  return {
+    enabled,
+    getAPI: () => ({ repositories })
+  };
+}
+
+async function executeChangedCopy(extension: GitExtension | undefined): Promise<{
+  clipboard: string;
+  result: CopyChangedResult;
+}> {
+  await resetClipboard();
+  const result = await copyChangedFiles(async () => extension);
+  const clipboard = await vscode.env.clipboard.readText();
+
+  return { clipboard, result };
 }
 
 suite("promptable Integration Test Suite", () => {
@@ -211,5 +253,170 @@ suite("promptable Integration Test Suite", () => {
     assert.ok(ignoreClipboard.includes("--- END OF FILE:"), "END marker missing");
     assert.ok(ignoreClipboard.includes("[Binary file — content not included]"), "Binary placeholder missing");
     assert.ok(ignoreClipboard.includes("``````"), "Dynamic fence missing");
+  });
+
+  test("Changed-files command copies a modified file and excludes unchanged files", async () => {
+    const root = await createTempWorkspace();
+    const modified = path.join(root, "modified.txt");
+    const unchanged = path.join(root, "unchanged.txt");
+
+    await fs.writeFile(modified, "GIT_MODIFIED_CONTENT");
+    await fs.writeFile(unchanged, "GIT_UNCHANGED_CONTENT");
+
+    const repository = gitRepository(root, {
+      workingTreeChanges: [gitChange(modified, GitStatus.MODIFIED)]
+    });
+    const { clipboard, result } = await executeChangedCopy(gitExtension([repository]));
+
+    assert.strictEqual(result, "copied");
+    assert.ok(clipboard.includes("GIT_MODIFIED_CONTENT"), "Modified file missing");
+    assert.ok(!clipboard.includes("GIT_UNCHANGED_CONTENT"), "Unchanged file was copied");
+  });
+
+  test("Changed-files command copies a staged file", async () => {
+    const root = await createTempWorkspace();
+    const staged = path.join(root, "staged.txt");
+
+    await fs.writeFile(staged, "GIT_STAGED_CONTENT");
+
+    const repository = gitRepository(root, {
+      indexChanges: [gitChange(staged, GitStatus.INDEX_MODIFIED)]
+    });
+    const { clipboard } = await executeChangedCopy(gitExtension([repository]));
+
+    assert.ok(clipboard.includes("GIT_STAGED_CONTENT"), "Staged file missing");
+  });
+
+  test("Changed-files command copies an untracked file without applying .gitignore", async () => {
+    const root = await createTempWorkspace();
+    const untracked = path.join(root, "untracked.txt");
+
+    await fs.writeFile(path.join(root, ".gitignore"), "untracked.txt\n");
+    await fs.writeFile(untracked, "GIT_UNTRACKED_CONTENT");
+
+    const repository = gitRepository(root, {
+      untrackedChanges: [gitChange(untracked, GitStatus.UNTRACKED)]
+    });
+    const { clipboard } = await executeChangedCopy(gitExtension([repository]));
+
+    assert.ok(clipboard.includes("GIT_UNTRACKED_CONTENT"), "Untracked ignored file missing");
+  });
+
+  test("Changed-files command combines merge, index, and working-tree groups", async () => {
+    const root = await createTempWorkspace();
+    const merge = path.join(root, "merge.txt");
+    const staged = path.join(root, "index.txt");
+    const working = path.join(root, "working.txt");
+
+    await fs.writeFile(merge, "GIT_MERGE_CONTENT");
+    await fs.writeFile(staged, "GIT_INDEX_CONTENT");
+    await fs.writeFile(working, "GIT_WORKING_CONTENT");
+
+    const repository = gitRepository(root, {
+      mergeChanges: [gitChange(merge, GitStatus.BOTH_MODIFIED)],
+      indexChanges: [gitChange(staged, GitStatus.INDEX_ADDED)],
+      workingTreeChanges: [gitChange(working, GitStatus.MODIFIED)]
+    });
+    const { clipboard } = await executeChangedCopy(gitExtension([repository]));
+
+    assert.ok(clipboard.includes("GIT_MERGE_CONTENT"), "Merge change missing");
+    assert.ok(clipboard.includes("GIT_INDEX_CONTENT"), "Index change missing");
+    assert.ok(clipboard.includes("GIT_WORKING_CONTENT"), "Working-tree change missing");
+  });
+
+  test("Changed-files command deduplicates files across Git change groups", async () => {
+    const root = await createTempWorkspace();
+    const duplicate = path.join(root, "duplicate.txt");
+
+    await fs.writeFile(duplicate, "GIT_DUPLICATE_CONTENT");
+
+    const repository = gitRepository(root, {
+      indexChanges: [gitChange(duplicate, GitStatus.INDEX_MODIFIED)],
+      workingTreeChanges: [gitChange(duplicate, GitStatus.MODIFIED)]
+    });
+    const { clipboard } = await executeChangedCopy(gitExtension([repository]));
+    const occurrences = clipboard.split("GIT_DUPLICATE_CONTENT").length - 1;
+
+    assert.strictEqual(occurrences, 1, "Duplicate file was copied more than once");
+  });
+
+  test("Changed-files command uses a placeholder for deleted files", async () => {
+    const root = await createTempWorkspace();
+    const deleted = path.join(root, "deleted.txt");
+    const repository = gitRepository(root, {
+      workingTreeChanges: [gitChange(deleted, GitStatus.DELETED)]
+    });
+    const { clipboard, result } = await executeChangedCopy(gitExtension([repository]));
+
+    assert.strictEqual(result, "copied");
+    assert.ok(clipboard.includes("deleted.txt"), "Deleted file marker missing");
+    assert.ok(clipboard.includes("[Deleted file — content not available]"), "Deleted placeholder missing");
+  });
+
+  test("Changed-files command reads a recreated file that also has a deleted status", async () => {
+    const root = await createTempWorkspace();
+    const recreated = path.join(root, "recreated.txt");
+
+    await fs.writeFile(recreated, "GIT_RECREATED_CONTENT");
+
+    const repository = gitRepository(root, {
+      indexChanges: [gitChange(recreated, GitStatus.INDEX_DELETED)],
+      untrackedChanges: [gitChange(recreated, GitStatus.UNTRACKED)]
+    });
+    const { clipboard } = await executeChangedCopy(gitExtension([repository]));
+
+    assert.ok(clipboard.includes("GIT_RECREATED_CONTENT"), "Recreated file content missing");
+    assert.ok(!clipboard.includes("[Deleted file — content not available]"), "Recreated file used deleted placeholder");
+  });
+
+  test("Changed-files command leaves the clipboard unchanged when there are no changes", async () => {
+    const root = await createTempWorkspace();
+    const { clipboard, result } = await executeChangedCopy(gitExtension([gitRepository(root)]));
+
+    assert.strictEqual(result, "noChanges");
+    assert.strictEqual(clipboard, clipboardSentinel);
+  });
+
+  test("Changed-files command handles unavailable Git and missing repositories", async () => {
+    const missing = await executeChangedCopy(undefined);
+    const disabled = await executeChangedCopy(gitExtension([], false));
+    const noRepositories = await executeChangedCopy(gitExtension([]));
+
+    await resetClipboard();
+    const activationFailure = await copyChangedFiles(async () => {
+      throw new Error("activation failed");
+    });
+
+    assert.strictEqual(missing.result, "gitUnavailable");
+    assert.strictEqual(disabled.result, "gitUnavailable");
+    assert.strictEqual(noRepositories.result, "noRepositories");
+    assert.strictEqual(activationFailure, "gitUnavailable");
+    assert.strictEqual(await vscode.env.clipboard.readText(), clipboardSentinel);
+  });
+
+  test("Changed-files command combines changes from multiple repositories", async () => {
+    const root = await createTempWorkspace();
+    const repositoryAPath = path.join(root, "repo-a");
+    const repositoryBPath = path.join(root, "repo-b");
+    const fileA = path.join(repositoryAPath, "a.txt");
+    const fileB = path.join(repositoryBPath, "b.txt");
+
+    await fs.mkdir(repositoryAPath);
+    await fs.mkdir(repositoryBPath);
+    await fs.writeFile(fileA, "GIT_REPOSITORY_A_CONTENT");
+    await fs.writeFile(fileB, "GIT_REPOSITORY_B_CONTENT");
+
+    const repositoryA = gitRepository(repositoryAPath, {
+      workingTreeChanges: [gitChange(fileA, GitStatus.MODIFIED)]
+    });
+    const repositoryB = gitRepository(repositoryBPath, {
+      indexChanges: [gitChange(fileB, GitStatus.INDEX_ADDED)]
+    });
+    const { clipboard } = await executeChangedCopy(gitExtension([repositoryA, repositoryB]));
+
+    assert.ok(clipboard.includes("GIT_REPOSITORY_A_CONTENT"), "First repository change missing");
+    assert.ok(clipboard.includes("GIT_REPOSITORY_B_CONTENT"), "Second repository change missing");
+    assert.ok(clipboard.includes(path.relative(workspaceRoot, fileA)), "First workspace-relative path missing");
+    assert.ok(clipboard.includes(path.relative(workspaceRoot, fileB)), "Second workspace-relative path missing");
   });
 });
