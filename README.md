@@ -14,8 +14,11 @@ Right-click files or folders, copy them as structured text, and paste directly i
 - **Recursive Folder Support**
   Includes all files inside selected folders recursively.
 
-- **.gitignore Aware**
-  Automatically respects `.gitignore` rules, including nested `.gitignore` files.
+- **Choose How `.gitignore` Is Handled**
+  The standard copy command respects `.gitignore` rules, including nested `.gitignore` files. An additional command can intentionally ignore those rules.
+
+- **Git Metadata Stays Excluded**
+  The `.git` directory itself is never copied, even when `.gitignore` rules are ignored.
 
 - **Binary-Safe**
   Binary files (images, PDFs, archives, executables) are detected automatically and replaced with a placeholder.
@@ -40,7 +43,9 @@ Right-click files or folders, copy them as structured text, and paste directly i
 
 1. Select one or more files and/or folders
 2. Right-click
-3. Choose **Copy as AI Context**
+3. Choose **Copy as AI Context** or **Copy as AI Context (Ignore .gitignore)**
+
+The standard command excludes files matched by `.gitignore`. Use the second command when those files should be included; `.git` itself remains excluded.
 
 ### Editor
 
@@ -52,6 +57,7 @@ You can also run the command from the Command Palette:
 ```
 
 Promptable: Copy as AI Context
+Promptable: Copy as AI Context (Ignore .gitignore)
 
 ```
 

@@ -44,6 +44,10 @@ async function collectFiles(uri: vscode.Uri, type?: vscode.FileType): Promise<vs
   }
 
   if (currentType === vscode.FileType.Directory) {
+    if (path.basename(uri.fsPath) === ".git") {
+      return [];
+    }
+
     const entries = await vscode.workspace.fs.readDirectory(uri);
 
     let files: vscode.Uri[] = [];
@@ -75,7 +79,7 @@ async function getGitignore(workspaceRoot: vscode.Uri): Promise<Ignore | null> {
           return rule;
         }
 
-        return relativeDir === "." ? rule : path.join(relativeDir, rule);
+        return relativeDir === "." ? rule : path.join(relativeDir, rule).replaceAll(path.sep, "/");
       });
 
       i.add(prefixedRules);
@@ -86,78 +90,84 @@ async function getGitignore(workspaceRoot: vscode.Uri): Promise<Ignore | null> {
   }
 }
 
+async function copyTargets(targets: vscode.Uri[], respectGitignore: boolean): Promise<void> {
+  if (targets.length === 0) {
+    return;
+  }
+
+  try {
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(targets[0]);
+    const workspaceRoot = workspaceFolder?.uri;
+    const gitignore = respectGitignore && workspaceRoot ? await getGitignore(workspaceRoot) : null;
+
+    const allFiles: vscode.Uri[] = [];
+
+    for (const target of targets) {
+      allFiles.push(...(await collectFiles(target)));
+    }
+
+    const uniqueFiles = Array.from(new Map(allFiles.map((u) => [u.fsPath, u])).values());
+    const filteredFiles = uniqueFiles.filter((file) => {
+      if (!gitignore || !workspaceRoot) {
+        return true;
+      }
+
+      const relative = path.relative(workspaceRoot.fsPath, file.fsPath);
+
+      return !gitignore.ignores(relative);
+    });
+
+    filteredFiles.sort((a, b) => {
+      if (!workspaceRoot) {
+        return a.fsPath.localeCompare(b.fsPath);
+      }
+
+      const ra = path.relative(workspaceRoot.fsPath, a.fsPath);
+      const rb = path.relative(workspaceRoot.fsPath, b.fsPath);
+
+      return ra.localeCompare(rb);
+    });
+
+    let finalOutput = "";
+
+    for (const file of filteredFiles) {
+      const buffer = await vscode.workspace.fs.readFile(file);
+      const relPath = workspaceRoot ? path.relative(workspaceRoot.fsPath, file.fsPath) : path.basename(file.fsPath);
+
+      finalOutput += `--- START OF FILE: ${relPath} ---\n`;
+
+      if (isBinary(buffer)) {
+        finalOutput += `[Binary file — content not included]\n`;
+      } else {
+        const text = new TextDecoder().decode(buffer);
+        const fence = createFence(text);
+        const ext = path.extname(file.fsPath).substring(1) || "text";
+
+        finalOutput += `${fence}${ext}\n${text}\n${fence}\n`;
+      }
+      finalOutput += `--- END OF FILE: ${relPath} ---\n\n`;
+    }
+
+    if (finalOutput) {
+      await vscode.env.clipboard.writeText(finalOutput.trim());
+
+      vscode.window.setStatusBarMessage(`Promptable: ${filteredFiles.length} file(s) copied`, 3000);
+    }
+  } catch (err) {
+    vscode.window.showErrorMessage(`Promptable Error: ${err}`);
+  }
+}
+
+function copyCommand(respectGitignore: boolean) {
+  return (mainUri?: vscode.Uri, allUris?: vscode.Uri[]) =>
+    copyTargets(getSelectedUris(mainUri, allUris), respectGitignore);
+}
+
 export function activate(context: vscode.ExtensionContext) {
-  const disposable = vscode.commands.registerCommand("promptable.copy", async (mainUri?: vscode.Uri, allUris?: vscode.Uri[]) => {
-    const targets = getSelectedUris(mainUri, allUris);
-
-    if (targets.length === 0) {
-      return;
-    }
-
-    try {
-      const workspaceFolder = vscode.workspace.getWorkspaceFolder(targets[0]);
-      const workspaceRoot = workspaceFolder?.uri;
-      const gitignore = workspaceRoot ? await getGitignore(workspaceRoot) : null;
-
-      const allFiles: vscode.Uri[] = [];
-
-      for (const target of targets) {
-        allFiles.push(...(await collectFiles(target)));
-      }
-
-      const uniqueFiles = Array.from(new Map(allFiles.map((u) => [u.fsPath, u])).values());
-      const filteredFiles = uniqueFiles.filter((file) => {
-        if (!gitignore || !workspaceRoot) {
-          return true;
-        }
-
-        const relative = path.relative(workspaceRoot.fsPath, file.fsPath);
-
-        return !gitignore.ignores(relative);
-      });
-
-      filteredFiles.sort((a, b) => {
-        if (!workspaceRoot) {
-          return a.fsPath.localeCompare(b.fsPath);
-        }
-
-        const ra = path.relative(workspaceRoot.fsPath, a.fsPath);
-        const rb = path.relative(workspaceRoot.fsPath, b.fsPath);
-
-        return ra.localeCompare(rb);
-      });
-
-      let finalOutput = "";
-
-      for (const file of filteredFiles) {
-        const buffer = await vscode.workspace.fs.readFile(file);
-        const relPath = workspaceRoot ? path.relative(workspaceRoot.fsPath, file.fsPath) : path.basename(file.fsPath);
-
-        finalOutput += `--- START OF FILE: ${relPath} ---\n`;
-
-        if (isBinary(buffer)) {
-          finalOutput += `[Binary file — content not included]\n`;
-        } else {
-          const text = new TextDecoder().decode(buffer);
-          const fence = createFence(text);
-          const ext = path.extname(file.fsPath).substring(1) || "text";
-
-          finalOutput += `${fence}${ext}\n${text}\n${fence}\n`;
-        }
-        finalOutput += `--- END OF FILE: ${relPath} ---\n\n`;
-      }
-
-      if (finalOutput) {
-        await vscode.env.clipboard.writeText(finalOutput.trim());
-
-        vscode.window.setStatusBarMessage(`Promptable: ${filteredFiles.length} file(s) copied`, 3000);
-      }
-    } catch (err) {
-      vscode.window.showErrorMessage(`Promptable Error: ${err}`);
-    }
-  });
-
-  context.subscriptions.push(disposable);
+  context.subscriptions.push(
+    vscode.commands.registerCommand("promptable.copy", copyCommand(true)),
+    vscode.commands.registerCommand("promptable.copyIgnoringGitignore", copyCommand(false)),
+  );
 }
 
 export function deactivate() {}

@@ -2,7 +2,7 @@
   "name": "promptable",
   "displayName": "Promptable",
   "description": "Copy files and folders as prompt-ready AI context. Supports folders, multi-select, .gitignore, and binary-safe output.",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "publisher": "zwe1ch",
   "author": {
     "name": "Rayk Jackisch",
@@ -35,6 +35,11 @@
         "command": "promptable.copy",
         "title": "Copy as AI Context",
         "category": "Promptable"
+      },
+      {
+        "command": "promptable.copyIgnoringGitignore",
+        "title": "Copy as AI Context (Ignore .gitignore)",
+        "category": "Promptable"
       }
     ],
     "menus": {
@@ -50,6 +55,11 @@
           "command": "promptable.copy",
           "group": "5_copy@2",
           "when": "resourceScheme == file || resourceScheme == folder"
+        },
+        {
+          "command": "promptable.copyIgnoringGitignore",
+          "group": "5_copy@3",
+          "when": "resourceScheme == file || resourceScheme == folder"
         }
       ]
     }
@@ -63,17 +73,17 @@
     "test": "vscode-test"
   },
   "dependencies": {
-    "ignore": "^7.0.5"
+    "ignore": "^7.0.6"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
-    "@types/node": "^22.19.8",
-    "@types/vscode": "^1.85.0",
-    "@vscode/test-cli": "^0.0.12",
-    "@vscode/test-electron": "^2.5.2",
-    "eslint": "^9.39.2",
-    "typescript": "^5.9.3",
-    "typescript-eslint": "^8.54.0"
+    "@types/node": "^26.1.2",
+    "@types/vscode": "^1.125.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
+    "eslint": "^10.8.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.66.0"
   },
   "repository": {
     "type": "git",
