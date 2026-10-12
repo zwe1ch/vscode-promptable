@@ -17,6 +17,9 @@ Right-click files or folders, copy them as structured text, and paste directly i
 - **Choose How `.gitignore` Is Handled**
   The standard copy command respects `.gitignore` rules, including nested `.gitignore` files. An additional command can intentionally ignore those rules.
 
+- **Project-Specific `.promptableignore`**
+  Permanently exclude files and directories from all copy commands, independent of `.gitignore`. See [Excluding files with `.promptableignore`](#excluding-files-with-promptableignore).
+
 - **Git Metadata Stays Excluded**
   The `.git` directory itself is never copied, even when `.gitignore` rules are ignored.
 
@@ -70,6 +73,44 @@ Promptable: Copy as AI Context (Ignore .gitignore)
 Promptable: Copy All Changed Files as AI Context
 
 ```
+
+---
+
+## Excluding files with `.promptableignore`
+
+Create a `.promptableignore` in the root of your workspace folder (or, for Git repositories outside a workspace folder, the repository root) to keep files out of the copied context. It uses the usual `.gitignore` syntax: file names, directories, wildcards, comments, and negations.
+
+Both `.promptableignore` and `.gitignore` files can also be placed in subdirectories. A nested file only applies to its own directory and below, and its patterns are interpreted relative to that directory, exactly like Git does (a pattern with a leading or inner `/` is anchored there, a plain `foo` matches at any depth below it). Rules of parent directories are inherited, and rules in deeper files take precedence over rules in parent files of the same type, so a nested `!important.log` can re-include a file that a central `*.log` excludes. As in Git, a file can never be re-included while one of its parent directories is excluded.
+
+```text
+project/
+├── .promptableignore          # *.log
+├── sub-project-1/
+│   ├── .promptableignore      # foo          -> only sub-project-1/foo is excluded
+│   └── foo
+└── sub-project-2/
+    ├── .promptableignore      # !important.log  -> re-includes it despite the central *.log
+    └── important.log
+```
+
+```text
+# Never copy these
+package-lock.json
+.env
+*.log
+dist/
+!important.log
+```
+
+- Applies to **all three commands**, including **Copy as AI Context (Ignore .gitignore)** and **Copy All Changed Files as AI Context**, for directly selected files, folders, multi-selections, and deleted files in the Git change list.
+- Case sensitivity follows the effective `core.ignorecase` of the Git repository that contains the file (Git's default is case-sensitive when the setting is not set), so nested and sibling repositories can differ. For files outside any repository known to the Git extension, or if the `git` executable cannot be run, the platform default is used: case-insensitive on Windows and macOS, case-sensitive elsewhere.
+- Works independently of `.gitignore`: a negation in one file type never re-includes files excluded by the other, and the same hierarchy rules apply to nested `.gitignore` files. Global Git ignore configuration (`core.excludesFile`, `.git/info/exclude`) is not evaluated.
+- In multi-root workspaces, each folder uses its own `.promptableignore`, and copied paths are prefixed with the workspace folder name so they stay unique.
+- Files outside the workspace use the `.promptableignore` of their Git repository root when Git knows that repository.
+- A `.promptableignore` file itself is never copied.
+- It may itself be listed in `.gitignore`; Promptable reads it directly from the root regardless of Git ignore rules.
+- Without a `.promptableignore`, nothing changes. If it exists but cannot be read, the copy is aborted with an error.
+- If every file is excluded, the clipboard is left untouched.
 
 ---
 

@@ -1,4 +1,6 @@
+import { execFile } from "child_process";
 import * as path from "path";
+import { promisify } from "util";
 import * as vscode from "vscode";
 
 import { GitChangedFile, GitExtension, collectGitChanges } from "./git";
@@ -74,30 +76,233 @@ async function collectFiles(uri: vscode.Uri, type?: vscode.FileType): Promise<vs
   return [];
 }
 
-async function getGitignore(workspaceRoot: vscode.Uri): Promise<Ignore | null> {
-  try {
-    const i = ignore();
-    const files = await vscode.workspace.findFiles(new vscode.RelativePattern(workspaceRoot, "**/.gitignore"));
+const PROMPTABLE_IGNORE_FILE = ".promptableignore";
+const GITIGNORE_FILE = ".gitignore";
 
-    for (const file of files) {
-      const content = await vscode.workspace.fs.readFile(file);
-      const relativeDir = path.dirname(path.relative(workspaceRoot.fsPath, file.fsPath));
-      const rules = new TextDecoder().decode(content).split(/\r?\n/);
+interface ProjectRoot {
+  readonly uri: vscode.Uri;
+  readonly applyGitignore: boolean;
+}
 
-      const prefixedRules = rules.map((rule) => {
-        if (!rule.trim() || rule.startsWith("#")) {
-          return rule;
-        }
+/**
+ * Hierarchical rules of one project root. Every ignore file found on the way from the root to a copied file is
+ * rewritten so that its patterns are scoped to the file's own directory and added to a single `ignore` instance,
+ * parents before children. Because the last matching pattern wins, deeper files take precedence over shallower ones,
+ * while the instance itself keeps excluded parent directories from being re-included.
+ */
+interface ProjectRules {
+  readonly root: vscode.Uri;
+  readonly promptableIgnore: Ignore;
+  readonly gitignore: Ignore | null;
+  readonly loadedDirectories: Set<string>;
+}
 
-        return relativeDir === "." ? rule : path.join(relativeDir, rule).replaceAll(path.sep, "/");
-      });
+function escapeGlobLiteral(segment: string): string {
+  return segment.replace(/[\\*?[\]!#]/g, "\\$&");
+}
 
-      i.add(prefixedRules);
-    }
-    return i;
-  } catch {
-    return null;
+/**
+ * Rewrites the patterns of an ignore file located in `directory` (segments relative to the project root)
+ * so that they have the same meaning when evaluated relative to the project root.
+ */
+function scopePatterns(content: string, directory: string[]): string[] {
+  const lines = content.split(/\r?\n/);
+
+  if (directory.length === 0) {
+    return lines;
   }
+
+  const prefix = directory.map(escapeGlobLiteral).join("/");
+  const scoped: string[] = [];
+
+  for (const line of lines) {
+    if (!line.trim() || line.startsWith("#")) {
+      continue;
+    }
+
+    const negated = line.startsWith("!");
+    const body = negated ? line.slice(1) : line;
+    const pattern = body.trimEnd();
+    const anchored = pattern.startsWith("/") || pattern.replace(/\/$/, "").includes("/");
+    const scopedBody = anchored ? `${prefix}/${body.replace(/^\//, "")}` : `${prefix}/**/${body}`;
+
+    scoped.push(negated ? `!${scopedBody}` : scopedBody);
+  }
+
+  return scoped;
+}
+
+type IgnoreFileReader = (directory: vscode.Uri, name: string, mustBeReadable: boolean) => Promise<string | null>;
+type IgnoreCaseResolver = (fsPath: string) => Promise<boolean>;
+
+const execFileAsync = promisify(execFile);
+
+// Fallback when no Git repository (or no usable Git) is known for a file: assume the usual file system
+// behavior of the platform, which is also what Git itself picks when it initializes a repository.
+const platformIgnoresCase = process.platform === "win32" || process.platform === "darwin";
+
+/**
+ * Reads the effective `core.ignorecase` of a repository (local, global, and system config). Git's default is false,
+ * which is what `git config --get` reports as exit code 1 when the key is not set. If Git cannot be run at all,
+ * the platform fallback is used instead of failing the copy.
+ */
+async function readCoreIgnoreCase(repositoryRoot: vscode.Uri): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", repositoryRoot.fsPath, "config", "--type=bool", "--get", "core.ignorecase"], { timeout: 10000, windowsHide: true });
+
+    return stdout.trim() === "true";
+  } catch (err) {
+    return (err as { code?: unknown }).code === 1 ? false : platformIgnoresCase;
+  }
+}
+
+/**
+ * Resolves case sensitivity per file from the deepest known Git repository containing it, so nested and sibling
+ * repositories can differ. Each repository is queried at most once per resolver.
+ */
+function createIgnoreCaseResolver(repositoryRoots: vscode.Uri[]): IgnoreCaseResolver {
+  const byRepository = new Map<string, Promise<boolean>>();
+
+  return async (fsPath) => {
+    const repositoryRoot = findRepositoryRoot(repositoryRoots, fsPath);
+
+    if (!repositoryRoot) {
+      return platformIgnoresCase;
+    }
+
+    let pending = byRepository.get(repositoryRoot.fsPath);
+
+    if (!pending) {
+      pending = readCoreIgnoreCase(repositoryRoot);
+      byRepository.set(repositoryRoot.fsPath, pending);
+    }
+
+    return pending;
+  };
+}
+
+function createIgnoreFileReader(): IgnoreFileReader {
+  const cache = new Map<string, Promise<string | null>>();
+
+  return (directory, name, mustBeReadable) => {
+    const key = `${directory.toString()}|${name}`;
+    let pending = cache.get(key);
+
+    if (!pending) {
+      pending = readIgnoreFile(directory, name, mustBeReadable);
+      cache.set(key, pending);
+    }
+
+    return pending;
+  };
+}
+
+async function readIgnoreFile(directory: vscode.Uri, name: string, mustBeReadable: boolean): Promise<string | null> {
+  try {
+    return new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(directory, name)));
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+
+    if (code === "FileNotFound" || code === "FileNotADirectory" || !mustBeReadable) {
+      return null;
+    }
+
+    throw new Error(`Could not read ${name} in ${directory.fsPath}: ${err}`);
+  }
+}
+
+function createProjectRules(project: ProjectRoot, ignoreCase: boolean): ProjectRules {
+  return {
+    root: project.uri,
+    promptableIgnore: ignore({ ignorecase: ignoreCase }),
+    gitignore: project.applyGitignore ? ignore({ ignorecase: ignoreCase }) : null,
+    loadedDirectories: new Set()
+  };
+}
+
+/**
+ * Loads the ignore files of every directory from the project root down to `directory`, parents first.
+ * Each directory is read at most once per rule set. A missing ignore file is fine, an unreadable
+ * .promptableignore throws, and an unreadable .gitignore is skipped.
+ */
+async function loadRulesUpTo(rules: ProjectRules, directory: string[], readFile: IgnoreFileReader): Promise<void> {
+  for (let depth = 0; depth <= directory.length; depth++) {
+    const segments = directory.slice(0, depth);
+    const key = segments.join("/");
+
+    if (rules.loadedDirectories.has(key)) {
+      continue;
+    }
+
+    rules.loadedDirectories.add(key);
+
+    const uri = segments.length > 0 ? vscode.Uri.joinPath(rules.root, ...segments) : rules.root;
+    const [promptableContent, gitContent] = await Promise.all([readFile(uri, PROMPTABLE_IGNORE_FILE, true), rules.gitignore ? readFile(uri, GITIGNORE_FILE, false) : null]);
+
+    if (promptableContent !== null) {
+      rules.promptableIgnore.add(scopePatterns(promptableContent, segments));
+    }
+
+    if (gitContent !== null) {
+      rules.gitignore?.add(scopePatterns(gitContent, segments));
+    }
+  }
+}
+
+function isPromptableIgnoreFile(fsPath: string): boolean {
+  return path.basename(fsPath).toLowerCase() === PROMPTABLE_IGNORE_FILE;
+}
+
+function isInside(root: vscode.Uri, fsPath: string): boolean {
+  const relative = path.relative(root.fsPath, fsPath);
+
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+/**
+ * Removes files excluded by the hierarchical .promptableignore files (and .gitignore files if the project root requests it).
+ * Both rule sets are evaluated independently, so negations in one never re-include files excluded by the other.
+ * A .promptableignore file is never included. Other files without a project root are not filtered.
+ * Rule sets are kept per project root, rule file type selection, and case sensitivity of the file's Git repository,
+ * so repositories with different `core.ignorecase` values never share patterns. The ignore files themselves are read once.
+ * Throws if an existing .promptableignore cannot be read.
+ */
+async function excludeIgnored<T extends { readonly uri: vscode.Uri }>(files: T[], getRoot: (file: T) => ProjectRoot | undefined, resolveIgnoreCase: IgnoreCaseResolver): Promise<T[]> {
+  const rulesByKey = new Map<string, ProjectRules>();
+  const readFile = createIgnoreFileReader();
+  const included: T[] = [];
+
+  for (const file of files) {
+    if (isPromptableIgnoreFile(file.uri.fsPath)) {
+      continue;
+    }
+
+    const project = getRoot(file);
+
+    if (!project || !isInside(project.uri, file.uri.fsPath)) {
+      included.push(file);
+      continue;
+    }
+
+    const ignoreCase = await resolveIgnoreCase(file.uri.fsPath);
+    const key = `${project.uri.toString()}|${project.applyGitignore}|${ignoreCase}`;
+    let rules = rulesByKey.get(key);
+
+    if (!rules) {
+      rules = createProjectRules(project, ignoreCase);
+      rulesByKey.set(key, rules);
+    }
+
+    const relative = path.relative(project.uri.fsPath, file.uri.fsPath).split(path.sep).join("/");
+
+    await loadRulesUpTo(rules, relative.split("/").slice(0, -1), readFile);
+
+    if (!rules.promptableIgnore.ignores(relative) && !rules.gitignore?.ignores(relative)) {
+      included.push(file);
+    }
+  }
+
+  return included;
 }
 
 async function copyFiles(files: CopyFile[]): Promise<void> {
@@ -140,16 +345,28 @@ async function copyFiles(files: CopyFile[]): Promise<void> {
   }
 }
 
-async function copyTargets(targets: vscode.Uri[], respectGitignore: boolean): Promise<void> {
+async function getRepositoryRoots(gitExtensionLoader: () => Promise<GitExtension | undefined>): Promise<vscode.Uri[]> {
+  try {
+    const gitExtension = await gitExtensionLoader();
+
+    return gitExtension?.enabled ? gitExtension.getAPI(1).repositories.map((repository) => repository.rootUri) : [];
+  } catch {
+    return [];
+  }
+}
+
+function findRepositoryRoot(repositoryRoots: vscode.Uri[], fsPath: string): vscode.Uri | undefined {
+  const containing = repositoryRoots.filter((root) => isInside(root, fsPath));
+
+  return containing.sort((a, b) => b.fsPath.length - a.fsPath.length)[0];
+}
+
+export async function copyTargets(targets: vscode.Uri[], respectGitignore: boolean, gitExtensionLoader: () => Promise<GitExtension | undefined> = loadGitExtension): Promise<void> {
   if (targets.length === 0) {
     return;
   }
 
   try {
-    const workspaceFolder = vscode.workspace.getWorkspaceFolder(targets[0]);
-    const workspaceRoot = workspaceFolder?.uri;
-    const gitignore = respectGitignore && workspaceRoot ? await getGitignore(workspaceRoot) : null;
-
     const allFiles: vscode.Uri[] = [];
 
     for (const target of targets) {
@@ -157,22 +374,35 @@ async function copyTargets(targets: vscode.Uri[], respectGitignore: boolean): Pr
     }
 
     const uniqueFiles = Array.from(new Map(allFiles.map((u) => [u.fsPath, u])).values());
-    const filteredFiles = uniqueFiles.filter((file) => {
-      if (!gitignore || !workspaceRoot) {
-        return true;
+    const repositoryRoots = await getRepositoryRoots(gitExtensionLoader);
+    const getProjectRoot = (uri: vscode.Uri): ProjectRoot | undefined => {
+      const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+
+      if (workspaceFolder) {
+        return { uri: workspaceFolder.uri, applyGitignore: respectGitignore };
       }
 
-      const relative = path.relative(workspaceRoot.fsPath, file.fsPath);
+      const repositoryRoot = findRepositoryRoot(repositoryRoots, uri.fsPath);
 
-      return !gitignore.ignores(relative);
-    });
+      return repositoryRoot ? { uri: repositoryRoot, applyGitignore: false } : undefined;
+    };
+    const filteredFiles = await excludeIgnored(
+      uniqueFiles.map((uri) => ({ uri })),
+      (file) => getProjectRoot(file.uri),
+      createIgnoreCaseResolver(repositoryRoots)
+    );
 
     await copyFiles(
-      filteredFiles.map((file) => ({
-        uri: file,
-        relativePath: workspaceRoot ? path.relative(workspaceRoot.fsPath, file.fsPath) : path.basename(file.fsPath),
-        sortPath: workspaceRoot ? path.relative(workspaceRoot.fsPath, file.fsPath) : file.fsPath
-      }))
+      filteredFiles.map(({ uri }) => {
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+        const relativePath = workspaceFolder ? getWorkspaceRelativePath(workspaceFolder, uri.fsPath) : undefined;
+
+        return {
+          uri,
+          relativePath: relativePath ?? path.basename(uri.fsPath),
+          sortPath: relativePath ?? uri.fsPath
+        };
+      })
     );
   } catch (err) {
     vscode.window.showErrorMessage(`Promptable Error: ${err}`);
@@ -189,14 +419,22 @@ async function loadGitExtension(): Promise<GitExtension | undefined> {
   return extension.isActive ? extension.exports : extension.activate();
 }
 
+function getGitProjectRoot(file: GitChangedFile): ProjectRoot {
+  return { uri: vscode.workspace.getWorkspaceFolder(file.uri)?.uri ?? file.repositoryRoot, applyGitignore: false };
+}
+
+function getWorkspaceRelativePath(workspaceFolder: vscode.WorkspaceFolder, fsPath: string): string {
+  const relative = path.relative(workspaceFolder.uri.fsPath, fsPath);
+  const isMultiRoot = (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
+
+  return isMultiRoot ? path.join(workspaceFolder.name, relative) : relative;
+}
+
 function getGitRelativePath(file: GitChangedFile, repositoryCount: number): string {
   const workspaceFolder = vscode.workspace.getWorkspaceFolder(file.uri);
 
   if (workspaceFolder) {
-    const relative = path.relative(workspaceFolder.uri.fsPath, file.uri.fsPath);
-    const isMultiRoot = (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
-
-    return isMultiRoot ? path.join(workspaceFolder.name, relative) : relative;
+    return getWorkspaceRelativePath(workspaceFolder, file.uri.fsPath);
   }
 
   const relative = path.relative(file.repositoryRoot.fsPath, file.uri.fsPath);
@@ -241,8 +479,19 @@ export async function copyChangedFiles(gitExtensionLoader: () => Promise<GitExte
   }
 
   try {
+    const files = await excludeIgnored(
+      changedFiles,
+      getGitProjectRoot,
+      createIgnoreCaseResolver(repositories.map((repository) => repository.rootUri))
+    );
+
+    if (files.length === 0) {
+      vscode.window.setStatusBarMessage("Promptable: No changed files", 3000);
+      return "noChanges";
+    }
+
     await copyFiles(
-      changedFiles.map((file) => {
+      files.map((file) => {
         const relativePath = getGitRelativePath(file, repositories.length);
 
         return { uri: file.uri, relativePath, sortPath: relativePath, deleted: file.deleted };
